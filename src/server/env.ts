@@ -7,11 +7,11 @@ import { z } from 'zod';
  */
 const ServerEnvSchema = z.object({
   GEMINI_API_KEY: z.string().min(1).optional(),
-  GEMINI_MODEL: z.string().min(1).default('gemini-3.6-flash'),
+  GEMINI_MODEL: z.string().min(1).default('gemini-3.1-flash-lite'),
   /** Tried in order when the primary model is overloaded (503) or out of quota (429). */
   GEMINI_FALLBACK_MODELS: z
     .string()
-    .default('gemini-3.7-flash,gemini-3.8-flash,gemini-3.5-flash,gemini-3-flash-preview,gemini-3.1-flash-lite')
+    .default('gemini-3.6-flash,gemini-3.7-flash,gemini-3.8-flash,gemini-3.5-flash,gemini-3-flash-preview')
     .transform((v) =>
       v
         .split(',')

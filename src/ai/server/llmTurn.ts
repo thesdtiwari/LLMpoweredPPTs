@@ -6,7 +6,6 @@ import type {
   ChatCompletionMessageToolCall,
   ChatCompletionTool,
 } from 'openai/resources/chat/completions/completions';
-import type { Stream } from 'openai/streaming';
 import type { ChatMessage, ToolCall, TurnEvent } from '../shared/protocol';
 import { TOOL_DESCRIPTIONS, TOOL_NAMES, TOOL_SCHEMAS } from '../shared/tools';
 import { toToolParameters } from './jsonSchema';
@@ -90,11 +89,21 @@ function toProviderMessages(
 
 // ---------- Capacity handling ----------
 
-/** Waits before each pass over the model list. Overload spikes are usually brief. */
+/** Waits before each extra pass over the model list. Overload spikes are usually brief. */
 const ROUND_DELAYS_MS = [0, 2_000, 5_000];
+/**
+ * A model that sends nothing for this long is treated as stuck and the next
+ * model is tried. Congested free-tier models sometimes accept a request and
+ * then stay silent until the platform kills the function.
+ */
+const FIRST_CHUNK_TIMEOUT_MS = 50_000;
+/** Stop starting new attempts after this long; the route's maxDuration is 300 s. */
+const STEP_BUDGET_MS = 250_000;
 
 /** Models that returned 429, skipped until Google's stated retry time (per server instance). */
 const quotaCooldownUntil = new Map<string, number>();
+
+class FirstChunkTimeout extends Error {}
 
 const isCapacityError = (err: unknown): err is InstanceType<typeof OpenAI.APIError> =>
   err instanceof OpenAI.APIError && (err.status === 429 || err.status === 503 || err.status === 500);
@@ -118,14 +127,64 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+type ChunkIterator = AsyncIterator<ChatCompletionChunk>;
+
+/**
+ * Opens a stream on one model and waits for its first chunk, giving up after
+ * `timeoutMs`. Returns the iterator plus that first chunk, so nothing is lost.
+ */
+async function openModel(
+  client: OpenAI,
+  model: string,
+  messages: ChatCompletionMessageParam[],
+  signal: AbortSignal,
+  timeoutMs: number,
+): Promise<{ iterator: ChunkIterator; first: IteratorResult<ChatCompletionChunk> }> {
+  const attempt = new AbortController();
+  const forwardAbort = () => attempt.abort();
+  signal.addEventListener('abort', forwardAbort, { once: true });
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    attempt.abort();
+  }, timeoutMs);
+
+  try {
+    const stream = await client.chat.completions.create(
+      {
+        model,
+        messages,
+        tools: TOOLS,
+        tool_choice: 'auto',
+        parallel_tool_calls: true,
+        stream: true,
+        // Gemini 3 thinks before answering; "low" keeps a full deck generation fast.
+        reasoning_effort: 'low',
+      },
+      { signal: attempt.signal },
+    );
+    const iterator = stream[Symbol.asyncIterator]();
+    const first = await iterator.next();
+    return { iterator, first };
+  } catch (err) {
+    if (timedOut && !signal.aborted) throw new FirstChunkTimeout(`${model} sent nothing for ${timeoutMs / 1000}s`);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener('abort', forwardAbort);
+  }
+}
+
 /**
  * Streams one model step and yields provider-neutral events. Each tool call is
  * emitted as soon as it is complete, so the browser can apply it while the
  * model keeps writing.
  *
- * Free-tier Gemini quotas are per model and models get temporarily overloaded,
- * so before streaming starts this walks the model list, skipping models known
- * to be out of quota, and retries the list a few times with short waits.
+ * Free-tier Gemini quotas are per model, models get overloaded, and a
+ * congested model can accept a request and then stay silent. So this walks the
+ * model list — skipping models known to be out of quota, abandoning any model
+ * that sends nothing within FIRST_CHUNK_TIMEOUT_MS — and retries the list a few
+ * times with short waits, all within the step's time budget.
  */
 export async function* streamTurn(options: {
   apiKey: string;
@@ -136,45 +195,55 @@ export async function* streamTurn(options: {
   signal: AbortSignal;
 }): AsyncGenerator<TurnEvent> {
   const { signal } = options;
+  const deadline = Date.now() + STEP_BUDGET_MS;
   // No SDK-level retries: failing fast lets us move to the next model instead of waiting.
   const client = new OpenAI({ apiKey: options.apiKey, baseURL: GEMINI_BASE_URL, maxRetries: 0 });
 
-  let stream: Stream<ChatCompletionChunk> | undefined;
+  let opened: { iterator: ChunkIterator; first: IteratorResult<ChatCompletionChunk> } | undefined;
   let model = '';
   let lastError: unknown;
+  let tried = 0;
 
   rounds: for (const [round, delay] of ROUND_DELAYS_MS.entries()) {
     if (delay > 0) {
+      if (Date.now() + delay > deadline) break;
       yield { type: 'status', message: `Gemini is busy — retrying (${round + 1}/${ROUND_DELAYS_MS.length})…` };
       await sleep(delay, signal);
     }
     for (const candidate of options.models) {
       if ((quotaCooldownUntil.get(candidate) ?? 0) > Date.now()) continue;
+      const remaining = deadline - Date.now();
+      if (remaining < 10_000) break rounds;
+      if (tried > 0) yield { type: 'status', message: `Switching to ${candidate}…` };
+      tried += 1;
       try {
-        stream = await client.chat.completions.create(
-          {
-            model: candidate,
-            messages: toProviderMessages(options.messages, options.deckJson, candidate, options.nudge),
-            tools: TOOLS,
-            tool_choice: 'auto',
-            parallel_tool_calls: true,
-            stream: true,
-            // Gemini 3 thinks before answering; "low" keeps a full deck generation fast.
-            reasoning_effort: 'low',
-          },
-          { signal },
+        opened = await openModel(
+          client,
+          candidate,
+          toProviderMessages(options.messages, options.deckJson, candidate, options.nudge),
+          signal,
+          Math.min(FIRST_CHUNK_TIMEOUT_MS, remaining),
         );
         model = candidate;
         break rounds;
       } catch (err) {
-        if (!isCapacityError(err) || signal.aborted) throw err;
+        if (signal.aborted) throw err;
+        if (err instanceof FirstChunkTimeout) {
+          console.warn(`[ai] ${err.message}; trying next model`);
+          lastError = err;
+          continue;
+        }
+        if (!isCapacityError(err)) throw err;
         lastError = err;
         if (err.status === 429) quotaCooldownUntil.set(candidate, Date.now() + retryAfterMs(err));
         console.warn(`[ai] ${candidate} unavailable (${err.status}); trying next model`);
       }
     }
   }
-  if (!stream) {
+  if (!opened) {
+    if (lastError instanceof FirstChunkTimeout) {
+      throw new Error('Gemini is not responding right now (every model timed out). Please try again in a minute.');
+    }
     throw lastError ?? new Error('Every configured Gemini model is out of quota. Try again in a minute.');
   }
 
@@ -184,8 +253,8 @@ export async function* streamTurn(options: {
   const tagged = (call: ToolCall): ToolCall =>
     call.extra ? { ...call, extra: { ...call.extra, [PRODUCED_BY]: model } } : call;
 
-  for await (const chunk of stream) {
-    const choice = chunk.choices[0];
+  for (let next = opened.first; !next.done; next = await opened.iterator.next()) {
+    const choice = next.value.choices[0];
     if (!choice) continue;
     const delta = choice.delta;
 

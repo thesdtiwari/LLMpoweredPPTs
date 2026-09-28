@@ -41,11 +41,11 @@ The editor also works without a key: click **Start from a sample deck** on the e
 
 ### Environment variables
 
-| Variable                 | Required    | Default                                                                                           | Notes                                                                                                                                              |
-| ------------------------ | ----------- | ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GEMINI_API_KEY`         | For AI chat | –                                                                                                 | **Server-only.** Read in `src/server/env.ts`, which is `server-only`, so it can't be bundled for the browser. Never prefix it with `NEXT_PUBLIC_`. |
-| `GEMINI_MODEL`           | No          | `gemini-3.6-flash`                                                                                | Primary model.                                                                                                                                     |
-| `GEMINI_FALLBACK_MODELS` | No          | `gemini-3.7-flash,gemini-3.8-flash,gemini-3.5-flash,gemini-3-flash-preview,gemini-3.1-flash-lite` | Tried in order when the primary returns 429 (quota) or 503 (overloaded).                                                                           |
+| Variable                 | Required    | Default                                                                                      | Notes                                                                                                                                              |
+| ------------------------ | ----------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GEMINI_API_KEY`         | For AI chat | –                                                                                            | **Server-only.** Read in `src/server/env.ts`, which is `server-only`, so it can't be bundled for the browser. Never prefix it with `NEXT_PUBLIC_`. |
+| `GEMINI_MODEL`           | No          | `gemini-3.1-flash-lite`                                                                      | Primary model: the fastest and least congested on the free tier.                                                                                   |
+| `GEMINI_FALLBACK_MODELS` | No          | `gemini-3.6-flash,gemini-3.7-flash,gemini-3.8-flash,gemini-3.5-flash,gemini-3-flash-preview` | Tried in order when a model returns 429 (quota) or 503 (overloaded), or sends nothing for 50 seconds.                                              |
 
 `.env` and `.env*.local` are git-ignored.
 
@@ -77,7 +77,7 @@ AI generation runs on **Gemini's free tier**, which is slow and rate-limited. Pl
 
 | What you ask for                          | Typical time  | Measured range |
 | ----------------------------------------- | ------------- | -------------- |
-| Create a 5–7 slide deck                   | 1–2 minutes   | 25 s – 5 min   |
+| Create a 5–7 slide deck                   | 20 s – 2 min  | 19 s – 5 min   |
 | Edit one slide / add a chart / move items | 10–30 seconds | 5 s – 1 min    |
 | Question about the deck ("which slide…")  | 5–15 seconds  | 5 s – 30 s     |
 
@@ -91,12 +91,13 @@ AI generation runs on **Gemini's free tier**, which is slow and rate-limited. Pl
 
 **Why it's slow, and the limits involved**
 
-- Gemini 3 "Flash" models think before answering. One step in our tests took up to about 3.5 minutes on the free tier.
+- Gemini 3 models think before answering, and free-tier capacity varies a lot from minute to minute. The default `gemini-3.1-flash-lite` usually answers a step in a few seconds. Heavier models (used as fallbacks) have taken up to about 3.5 minutes per step, or accepted a request and then sent nothing at all.
+- **A model that sends nothing for 50 seconds is abandoned** and the next model is tried; the chat shows "Switching to …". If every model is busy, you get a clear error within the step's time budget instead of a silent hang.
 - A deck generation is about 4–6 requests: 1 plan, fills in batches of up to 2 slides, then a short summary.
 - Each request is a separate server call, limited to **300 seconds** (`maxDuration` in `src/app/api/ai/turn/route.ts`, the Vercel Hobby maximum). A whole generation can therefore run longer than 5 minutes; only a single step is capped.
 - The free tier allows about **20 requests per model** per quota window. When one model is exhausted or overloaded (429 / 503), the app falls back through the other Gemini models listed in `GEMINI_FALLBACK_MODELS`.
 
-**To make it fast:** enable billing on the Google Cloud project behind `GEMINI_API_KEY` (a paid tier gives higher quotas and faster, less congested responses). No code changes are needed. You can also set `GEMINI_MODEL` to a lighter model such as `gemini-3.1-flash-lite`, which is quicker but produces less polished layouts.
+**To make it faster and more reliable:** enable billing on the Google Cloud project behind `GEMINI_API_KEY` (a paid tier gives higher quotas and faster, less congested responses). No code changes are needed. With a paid tier you can also set `GEMINI_MODEL=gemini-3.6-flash` (or newer) for more polished layouts. The default flash-lite model trades some layout quality for speed.
 
 While the AI is working, you can still browse slides and edit on the canvas. Deleting is disabled until the turn finishes, and **Stop** keeps everything created so far.
 
@@ -372,7 +373,7 @@ ChatPanel → useAiSession ──POST {messages, deck view}──▶ /api/ai/tur
 
 ## Testing
 
-- **Unit tests (Vitest, in CI):** 50 tests in 8 files, run with `npm test`. They cover:
+- **Unit tests (Vitest, in CI):** 52 tests in 8 files, run with `npm test`. They cover:
   - every domain operation, including all-or-nothing behavior, clamping, locks and z-order;
   - chart and table data edits;
   - undo/redo grouping and change tracking;
@@ -392,7 +393,7 @@ ChatPanel → useAiSession ──POST {messages, deck view}──▶ /api/ai/tur
 **AI provider**
 
 - ⚠️ **Gemini free-tier limits.** Each model allows about 20 requests per quota window, and models are sometimes overloaded (503). A full deck generation uses about 4–6 requests. The fallback chain handles most failures, but under heavy use every model can be busy and the chat reports it. **A paid Gemini tier is recommended for a live demo.**
-- ⚠️ **Generation speed.** On the free tier, a 5–7 slide deck takes about 1–2 minutes and sometimes up to about 5 minutes (measured 25 s – 5 min). A single step can take up to about 3.5 minutes, within the route's 300-second limit. Slides appear progressively, but the whole turn is slow. See [Generation time](#generation-time-please-read-before-testing).
+- ⚠️ **Generation speed.** On the free tier, a 5–7 slide deck usually takes 20 seconds to 2 minutes, and sometimes up to about 5 minutes (measured 19 s – 5 min). A single step can take up to about 3.5 minutes, within the route's 300-second limit. Slides appear progressively, but the whole turn is slow. See [Generation time](#generation-time-please-read-before-testing).
 - **Streaming granularity.** Slides appear as each tool call completes, one slide at a time. Elements within a slide appear together rather than one by one.
 - **Model reliability.** The model occasionally sends invalid arguments. Common cases are repaired automatically; the rest show as an error chip and the model retries. Gemini can also end a step with `MALFORMED_FUNCTION_CALL` (no tool call at all), or a stream can be cut off. The agent loop detects both, and planned slides left empty, and retries up to 4 times with a note to the model, showing "retrying…" in the chat. Each retry costs an extra step.
 

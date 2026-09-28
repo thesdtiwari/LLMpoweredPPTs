@@ -50,6 +50,15 @@ const IMAGE_KINDS = new Set(['image', 'img', 'picture', 'photo', 'illustration']
 const TABLE_KINDS = new Set(['table', 'grid']);
 const CHART_TYPES = ['bar', 'line', 'area', 'pie'];
 
+/** Keyword fallback for kinds not in the alias tables, e.g. "bullet_points", "subheading", "logo". */
+const KIND_KEYWORDS: readonly [string, RegExp][] = [
+  ['chart', /chart|graph|plot/],
+  ['table', /table|grid|matrix/],
+  ['image', /image|img|photo|picture|logo|illustration|screenshot/],
+  ['shape', /shape|rect|circle|ellipse|oval|line|divider|separator|icon|box|badge/],
+  ['text', /text|title|head|bullet|list|para|quote|callout|stat|label|note|caption|body|point/],
+];
+
 /** Guesses the kind from the fields present when `kind` is missing or unknown. */
 function inferKind(el: Json): string | undefined {
   if ('chartType' in el || 'series' in el || 'categories' in el) return 'chart';
@@ -68,6 +77,8 @@ function toNumber(v: unknown): unknown {
 }
 
 export function normalizeElementSpec(input: unknown): unknown {
+  // A bare string is a text element.
+  if (typeof input === 'string') return { kind: 'text', text: input };
   if (!isObject(input)) return input;
   const el: Json = { ...input };
   const raw =
@@ -102,8 +113,10 @@ export function normalizeElementSpec(input: unknown): unknown {
     el.kind = 'chart';
     el.chartType ??= CHART_TYPES.find((t) => raw.includes(t)) ?? 'bar';
   } else if (!raw || !['text', 'image', 'shape', 'chart', 'table'].includes(raw)) {
-    const inferred = inferKind(el);
+    const inferred = inferKind(el) ?? (raw ? KIND_KEYWORDS.find(([, re]) => re.test(raw))?.[0] : undefined);
     if (inferred) el.kind = inferred;
+    if (inferred === 'text' && raw && /bullet|list|point/.test(raw)) el.listStyle ??= 'bullet';
+    if (inferred === 'text' && raw && /title|head/.test(raw)) el.role ??= raw.includes('sub') ? 'subtitle' : 'heading';
   }
 
   if (el.kind === 'text' && Array.isArray(el.text)) el.text = el.text.join('\n');
@@ -120,13 +133,27 @@ export function normalizeElementSpec(input: unknown): unknown {
   return el;
 }
 
+/** Names models sometimes use instead of `elements`. */
+const ELEMENT_LIST_KEYS = ['elements', 'items', 'content', 'components', 'objects', 'shapes'];
+
+function elementList(args: Json): unknown[] | undefined {
+  for (const key of ELEMENT_LIST_KEYS) {
+    if (Array.isArray(args[key])) return args[key];
+  }
+  return undefined;
+}
+
 /** Applies element-spec repairs to the tools that carry element specs. */
 export function normalizeToolArgs(toolName: string, args: unknown): unknown {
   if (!isObject(args)) return args;
   switch (toolName) {
     case 'populate_slide':
-    case 'add_slide':
-      return Array.isArray(args.elements) ? { ...args, elements: args.elements.map(normalizeElementSpec) } : args;
+    case 'add_slide': {
+      const list = elementList(args);
+      if (!list) return args;
+      const rest = Object.fromEntries(Object.entries(args).filter(([k]) => !ELEMENT_LIST_KEYS.includes(k)));
+      return { ...rest, elements: list.map(normalizeElementSpec) };
+    }
     case 'add_element':
       return { ...args, element: normalizeElementSpec(args.element) };
     case 'add_chart':

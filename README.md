@@ -11,14 +11,15 @@ Generate a slide deck from a prompt, refine it through chat, and edit it on a fr
 ## Contents
 
 1. [Setup](#setup)
-2. [Features](#features)
-3. [Architecture overview](#architecture-overview)
-4. [Code architecture](#code-architecture)
-5. [Drag and drop and cross-slide moves](#drag-and-drop-and-cross-slide-moves)
-6. [AI agent](#ai-agent)
-7. [Export](#export)
-8. [Testing](#testing)
-9. [Known issues and incomplete features](#known-issues-and-incomplete-features)
+2. [Generation time (please read before testing)](#generation-time-please-read-before-testing)
+3. [Features](#features)
+4. [Architecture overview](#architecture-overview)
+5. [Code architecture](#code-architecture)
+6. [Drag and drop and cross-slide moves](#drag-and-drop-and-cross-slide-moves)
+7. [AI agent](#ai-agent)
+8. [Export](#export)
+9. [Testing](#testing)
+10. [Known issues and incomplete features](#known-issues-and-incomplete-features)
 
 ---
 
@@ -67,6 +68,37 @@ The editor also works without a key: click **Start from a sample deck** on the e
 3. Deploy, then open `https://<your-app>/api/health` and check it shows `"aiConfigured": true`.
 
 CI (`.github/workflows/ci.yml`) runs the type check, lint, unit tests and a production build on every push and pull request.
+
+---
+
+## Generation time (please read before testing)
+
+AI generation runs on **Gemini's free tier**, which is slow and rate-limited. Please allow time before concluding something is stuck.
+
+| What you ask for                          | Typical time  | Measured range |
+| ----------------------------------------- | ------------- | -------------- |
+| Create a 5–7 slide deck                   | 1–2 minutes   | 25 s – 5 min   |
+| Edit one slide / add a chart / move items | 10–30 seconds | 5 s – 1 min    |
+| Question about the deck ("which slide…")  | 5–15 seconds  | 5 s – 30 s     |
+
+**What you'll see while it works**
+
+- Planning takes about 5–20 seconds; then all slides appear in the filmstrip as **"Generating…"** placeholders.
+- Slides fill in one or two at a time. Each completed tool call shows a ✓ chip in the chat.
+- **"Thinking…"** with no new chips for a minute or more is normal on the free tier. The model is reasoning, and the server sends a keep-alive signal every 15 seconds so the connection stays open.
+- If the model returns a malformed or cut-off step, the chat shows **"retrying…"** and continues automatically (up to 4 times). Planned slides the model leaves empty are filled automatically too.
+- If every Gemini model is busy or out of quota, the chat says so. Wait about a minute and send the request again.
+
+**Why it's slow, and the limits involved**
+
+- Gemini 3 "Flash" models think before answering. One step in our tests took up to about 3.5 minutes on the free tier.
+- A deck generation is about 4–6 requests: 1 plan, fills in batches of up to 2 slides, then a short summary.
+- Each request is a separate server call, limited to **300 seconds** (`maxDuration` in `src/app/api/ai/turn/route.ts`, the Vercel Hobby maximum). A whole generation can therefore run longer than 5 minutes; only a single step is capped.
+- The free tier allows about **20 requests per model** per quota window. When one model is exhausted or overloaded (429 / 503), the app falls back through the other Gemini models listed in `GEMINI_FALLBACK_MODELS`.
+
+**To make it fast:** enable billing on the Google Cloud project behind `GEMINI_API_KEY` (a paid tier gives higher quotas and faster, less congested responses). No code changes are needed. You can also set `GEMINI_MODEL` to a lighter model such as `gemini-3.1-flash-lite`, which is quicker but produces less polished layouts.
+
+While the AI is working, you can still browse slides and edit on the canvas. Deleting is disabled until the turn finishes, and **Stop** keeps everything created so far.
 
 ---
 
@@ -340,13 +372,14 @@ ChatPanel → useAiSession ──POST {messages, deck view}──▶ /api/ai/tur
 
 ## Testing
 
-- **Unit tests (Vitest, in CI):** 43 tests in 7 files, run with `npm test`. They cover:
+- **Unit tests (Vitest, in CI):** 50 tests in 8 files, run with `npm test`. They cover:
   - every domain operation, including all-or-nothing behavior, clamping, locks and z-order;
   - chart and table data edits;
   - undo/redo grouping and change tracking;
   - the delete lock;
   - the tool executor (plan → populate, targeted patches, moves, validation errors);
   - argument normalization;
+  - the agent loop's recovery rules (malformed or cut-off steps, empty planned slides);
   - the streamed tool-call reassembler (Gemini and OpenAI chunk formats);
   - the Gemini schema conversion;
   - canvas snapping and resize maths.
@@ -358,8 +391,8 @@ ChatPanel → useAiSession ──POST {messages, deck view}──▶ /api/ai/tur
 
 **AI provider**
 
-- ⚠️ **Gemini free-tier limits.** Each model allows about 20 requests per quota window, and models are sometimes overloaded (503). A full deck generation uses about 4 requests. The fallback chain handles most failures, but under heavy use every model can be busy and the chat reports it. **A paid Gemini tier is recommended for a live demo.**
-- ⚠️ **Generation speed.** On the free tier, a 5–7 slide deck takes about 30–150 seconds (thinking models). Slides appear progressively, but the whole turn is slow.
+- ⚠️ **Gemini free-tier limits.** Each model allows about 20 requests per quota window, and models are sometimes overloaded (503). A full deck generation uses about 4–6 requests. The fallback chain handles most failures, but under heavy use every model can be busy and the chat reports it. **A paid Gemini tier is recommended for a live demo.**
+- ⚠️ **Generation speed.** On the free tier, a 5–7 slide deck takes about 1–2 minutes and sometimes up to about 5 minutes (measured 25 s – 5 min). A single step can take up to about 3.5 minutes, within the route's 300-second limit. Slides appear progressively, but the whole turn is slow. See [Generation time](#generation-time-please-read-before-testing).
 - **Streaming granularity.** Slides appear as each tool call completes, one slide at a time. Elements within a slide appear together rather than one by one.
 - **Model reliability.** The model occasionally sends invalid arguments. Common cases are repaired automatically; the rest show as an error chip and the model retries. Gemini can also end a step with `MALFORMED_FUNCTION_CALL` (no tool call at all), or a stream can be cut off. The agent loop detects both, and planned slides left empty, and retries up to 4 times with a note to the model, showing "retrying…" in the chat. Each retry costs an extra step.
 

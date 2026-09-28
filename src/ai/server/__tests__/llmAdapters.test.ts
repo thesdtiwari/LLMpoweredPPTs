@@ -46,8 +46,26 @@ describe('toToolParameters', () => {
     }
   });
 
-  it('keeps discriminators as enums', () => {
-    const json = JSON.stringify(toToolParameters(TOOL_SCHEMAS.add_element));
-    expect(json).toContain('"enum":["chart"]');
+  it('flattens the element union into one object with a kind enum', () => {
+    const params = toToolParameters(TOOL_SCHEMAS.add_element) as {
+      properties: {
+        element: {
+          type: string;
+          anyOf?: unknown;
+          required: string[];
+          properties: Record<string, unknown>;
+          description: string;
+        };
+      };
+    };
+    const element = params.properties.element;
+    expect(element.anyOf).toBeUndefined();
+    expect(element.type).toBe('object');
+    expect(element.required).toEqual(['kind']);
+    expect(element.properties.kind).toEqual({ type: 'string', enum: ['text', 'image', 'shape', 'chart', 'table'] });
+    for (const field of ['text', 'description', 'shape', 'chartType', 'series', 'rows', 'box']) {
+      expect(element.properties, field).toHaveProperty(field);
+    }
+    expect(element.description).toContain('chart: chartType (required)');
   });
 });

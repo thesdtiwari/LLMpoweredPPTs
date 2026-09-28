@@ -48,6 +48,7 @@ function toProviderMessages(
   messages: readonly ChatMessage[],
   deckJson: string,
   model: string,
+  nudge?: string,
 ): ChatCompletionMessageParam[] {
   const history = messages.map((m): ChatCompletionMessageParam => {
     switch (m.role) {
@@ -77,7 +78,7 @@ function toProviderMessages(
   // The deck state rides on the newest message so it is the freshest thing the model reads.
   // (A trailing system message does not work: Gemini merges all system messages into one
   // instruction at the top, where stale chat history would sit closer to the question.)
-  const state = deckStateMessage(deckJson);
+  const state = deckStateMessage(deckJson) + (nudge ? `\n\nNOTE FROM THE APP: ${nudge}` : '');
   const last = history.at(-1);
   if (last?.role === 'user' && typeof last.content === 'string') {
     history[history.length - 1] = { role: 'user', content: `${state}\n\nUSER REQUEST:\n${last.content}` };
@@ -131,6 +132,7 @@ export async function* streamTurn(options: {
   models: readonly string[];
   messages: readonly ChatMessage[];
   deckJson: string;
+  nudge?: string;
   signal: AbortSignal;
 }): AsyncGenerator<TurnEvent> {
   const { signal } = options;
@@ -152,7 +154,7 @@ export async function* streamTurn(options: {
         stream = await client.chat.completions.create(
           {
             model: candidate,
-            messages: toProviderMessages(options.messages, options.deckJson, candidate),
+            messages: toProviderMessages(options.messages, options.deckJson, candidate, options.nudge),
             tools: TOOLS,
             tool_choice: 'auto',
             parallel_tool_calls: true,

@@ -6,8 +6,11 @@ import { getServerEnv, MissingConfigError, requireGeminiApiKey } from '@/server/
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-/** Long enough for a full deck-population step on hosted platforms. */
-export const maxDuration = 120;
+/** Vercel's maximum on the Hobby plan (fluid compute). Slow free-tier model steps can take minutes. */
+export const maxDuration = 300;
+
+/** SSE comment lines keep the connection alive while the model is thinking silently. */
+const KEEP_ALIVE_MS = 15_000;
 
 const MAX_DECK_JSON = 300_000;
 
@@ -55,12 +58,20 @@ export async function POST(req: Request) {
   const body = new ReadableStream<Uint8Array>({
     async start(controller) {
       const send = (event: TurnEvent) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+      const keepAlive = setInterval(() => {
+        try {
+          controller.enqueue(encoder.encode(': keep-alive\n\n'));
+        } catch {
+          clearInterval(keepAlive); // client went away
+        }
+      }, KEEP_ALIVE_MS);
       try {
         for await (const event of streamTurn({
           apiKey,
           models: [getServerEnv().GEMINI_MODEL, ...getServerEnv().GEMINI_FALLBACK_MODELS],
           messages: parsed.data.messages,
           deckJson,
+          nudge: parsed.data.nudge,
           signal: req.signal,
         })) {
           send(event);
@@ -68,6 +79,7 @@ export async function POST(req: Request) {
       } catch (err) {
         if (!req.signal.aborted) send({ type: 'error', message: describeError(err) });
       } finally {
+        clearInterval(keepAlive);
         controller.close();
       }
     },

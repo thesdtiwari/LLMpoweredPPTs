@@ -14,7 +14,7 @@ export const SYSTEM_PROMPT = `You are the AI agent inside a slide editor. You bu
 # Creating a new deck (two phases, mandatory)
 When the deck is empty, or the user asks for a new presentation:
 1. Call plan_deck ONCE, alone, with the outline: 5–8 slides unless the user asks otherwise, a title slide first, a clear story, and a layout per slide. Use replaceExisting=true only when replacing an existing deck.
-2. After you receive the slide ids, call populate_slide for EVERY planned slide. You may call several in parallel.
+2. After you receive the slide ids, call populate_slide for EVERY planned slide, at most 2 slides per response (the app asks for the rest). Keep each slide to at most 8 elements.
 Include at least one chart and one table when the topic involves numbers, comparisons or options. Use realistic, internally consistent sample data when the user gives none, and say so briefly.
 
 # Editing an existing deck (targeted patches only)

@@ -7,6 +7,7 @@ import { useDeckActions } from '@/store/DeckProvider';
 import { useEditorUi } from '@/store/EditorUiProvider';
 import type { ChatMessage, ToolCall } from '../shared/protocol';
 import { fetchTurn } from './sse';
+import { decideNextStep, type PendingSlide } from './stepOutcome';
 import { executeTool } from './toolExecutor';
 
 export type ChatItem =
@@ -18,8 +19,8 @@ export type ChatItem =
 
 type NewItem = ChatItem extends infer T ? (T extends ChatItem ? Omit<T, 'id'> : never) : never;
 
-/** Safety net against runaway loops; a full deck generation takes 2–4 steps. */
-const MAX_STEPS = 12;
+/** Safety net against runaway loops; a full deck generation takes about 3–6 steps. */
+const MAX_STEPS = 16;
 /** Older turns are dropped from the request; the deck state is re-sent in full every step anyway. */
 const HISTORY_USER_TURNS = 6;
 
@@ -83,6 +84,16 @@ export function useAiSession() {
       transcript.push({ role: 'user', content: prompt });
       addItem({ kind: 'user', text: prompt });
       let lastTouchedSlide: string | undefined;
+      let recoveries = 0;
+      /** One-off note for the next step (after a malformed / cut-off step, or empty planned slides). */
+      let nudge: string | undefined;
+      const pendingSlides = (): PendingSlide[] => {
+        const deck = actions.getDeck();
+        return deck.slideOrder.flatMap((id, i) => {
+          const slide = deck.slides[id];
+          return slide?.status === 'pending' ? [{ id, position: i + 1, title: slide.title }] : [];
+        });
+      };
 
       try {
         for (let step = 0; step < MAX_STEPS; step++) {
@@ -90,6 +101,8 @@ export function useAiSession() {
           let assistantItem: string | null = null;
           let failure: string | null = null;
           let statusItem: string | null = null;
+          let sawDone = false;
+          let finishReason: string | null = null;
           const toolCalls: ToolCall[] = [];
           const results: ChatMessage[] = [];
           const toolItems = new Map<string, string>();
@@ -102,7 +115,9 @@ export function useAiSession() {
           );
 
           try {
-            for await (const event of fetchTurn({ messages: recentHistory(transcript), deck }, controller.signal)) {
+            const request = { messages: recentHistory(transcript), deck, ...(nudge && { nudge }) };
+            nudge = undefined;
+            for await (const event of fetchTurn(request, controller.signal)) {
               if (event.type === 'text') {
                 text += event.delta;
                 assistantItem ??= addItem({ kind: 'assistant', text: '' });
@@ -128,6 +143,9 @@ export function useAiSession() {
                 else statusItem = addItem({ kind: 'notice', text: event.message });
               } else if (event.type === 'error') {
                 failure = event.message;
+              } else if (event.type === 'done') {
+                sawDone = true;
+                finishReason = event.finishReason;
               }
             }
           } finally {
@@ -140,7 +158,22 @@ export function useAiSession() {
             addItem({ kind: 'error', text: failure });
             break;
           }
-          if (toolCalls.length === 0) break;
+
+          const decision = decideNextStep(
+            { sawDone, finishReason, toolCallCount: toolCalls.length, text },
+            pendingSlides(),
+            recoveries,
+          );
+          if (decision.kind === 'finish') break;
+          if (decision.kind === 'fail') {
+            addItem({ kind: 'error', text: decision.message });
+            break;
+          }
+          if (decision.kind === 'retry') {
+            recoveries += 1;
+            nudge = decision.nudge;
+            addItem({ kind: 'notice', text: decision.notice });
+          }
           if (step === MAX_STEPS - 1) addItem({ kind: 'notice', text: `Stopped after ${MAX_STEPS} steps.` });
         }
       } catch (err) {

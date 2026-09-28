@@ -361,7 +361,7 @@ ChatPanel → useAiSession ──POST {messages, deck view}──▶ /api/ai/tur
 - ⚠️ **Gemini free-tier limits.** Each model allows about 20 requests per quota window, and models are sometimes overloaded (503). A full deck generation uses about 4 requests. The fallback chain handles most failures, but under heavy use every model can be busy and the chat reports it. **A paid Gemini tier is recommended for a live demo.**
 - ⚠️ **Generation speed.** On the free tier, a 5–7 slide deck takes about 30–150 seconds (thinking models). Slides appear progressively, but the whole turn is slow.
 - **Streaming granularity.** Slides appear as each tool call completes, one slide at a time. Elements within a slide appear together rather than one by one.
-- **Model reliability.** The model occasionally sends invalid arguments. Common cases are repaired automatically; the rest show as an error chip and the model retries, which costs an extra step.
+- **Model reliability.** The model occasionally sends invalid arguments. Common cases are repaired automatically; the rest show as an error chip and the model retries. Gemini can also end a step with `MALFORMED_FUNCTION_CALL` (no tool call at all), or a stream can be cut off. The agent loop detects both, and planned slides left empty, and retries up to 4 times with a note to the model, showing "retrying…" in the chat. Each retry costs an extra step.
 
 **Editor**
 

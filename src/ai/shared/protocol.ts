@@ -34,6 +34,11 @@ export const TurnRequestSchema = z.object({
   messages: z.array(ChatMessageSchema).min(1).max(200),
   /** Compact, current deck state (see domain/serialize/aiView). Re-sent every step so the model sees manual edits. */
   deck: z.unknown(),
+  /**
+   * One-off instruction for this step only (e.g. after a malformed response,
+   * or when planned slides are still empty). Not stored in the transcript.
+   */
+  nudge: z.string().max(2_000).optional(),
 });
 export type TurnRequest = z.infer<typeof TurnRequestSchema>;
 
